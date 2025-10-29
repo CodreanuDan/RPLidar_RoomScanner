@@ -170,7 +170,7 @@ def decode_sample_data(data: bytes, filename: str) -> None:
         
 if __name__ == "__main__":
     
-    input_file = r"d:\FACULTATE\AN_2_MASTER\SISTEME INFORMATICE RECONFIGURABILE\RPLidar_RoomScanner\FrameGrabber\scripts\sample_data.txt"
+    input_file = r"d:\FACULTATE\AN_2_MASTER\SISTEME INFORMATICE RECONFIGURABILE\RPLidar_RoomScanner\RPLidar_RoomScanner\FrameGrabber\scripts\sample_data.txt"
     output_file = "LidarParsed.xlsx"
     
     # Read sample file

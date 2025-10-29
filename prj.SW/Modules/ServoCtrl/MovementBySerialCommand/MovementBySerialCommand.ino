@@ -12,7 +12,7 @@ int currentAngle = 0;
 unsigned long lastStepTime = 0;
 
 // 1 sec = 5 grade/s -> delay intre pasi, aici o sa modificam la 1 secunda/pas
-const unsigned long STEP_INTERVAL = 1000; 
+const unsigned long STEP_INTERVAL = 200; 
 const int STEP_SIZE = 1; 
 
 void setup() 
