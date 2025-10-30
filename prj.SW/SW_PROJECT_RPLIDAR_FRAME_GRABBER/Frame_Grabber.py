@@ -1,39 +1,121 @@
-import serial as pyserial_lib 
+import serial as pyserial_lib
 import time
 import os
 
 FILE_NAME = "sample_data.txt"
-DEBUG = True
+OUTPUT_DIR = "frames"
+BAUDRATE = 115200
+PORT = "COM5"
 
-with open(FILE_NAME, 'a') as f:
-    
-    print(f"Record LIDAR data in file: '{os.path.abspath(f.name)}'.")
-    print("-" * 40)
+DEBUG = False
 
-    try:
-        serial_com = pyserial_lib.Serial(port="COM5", baudrate=115200, timeout=1) 
-        print(f"PORT: {serial_com.port} is open, baudrate = {serial_com.baudrate} bps.")
-        time.sleep(2) 
-        
-        while True:
+END_MARKER = bytes([0xFF, 0xFF, 0xFF, 0xFF])  # STOP frame marker
 
-            if serial_com.in_waiting > 0:
-                data_raw = serial_com.read()
-                
-                if data_raw:
-                    data_hex_line = ' '.join(f'{b:#04x}' for b in data_raw) + '\n'
-                    
-                    if not DEBUG:
-                        f.write(data_hex_line)
-                    
-                    print(data_hex_line.strip())  
-            else:
-                time.sleep(0.01) 
 
-    except KeyboardInterrupt:
-        print("\nKeyboardInterrupt")
+class CommandFlags:
+    STOP   = 0x00
+    START  = 0x01
+    RESUME = 0x02
 
-    finally:
-        if 'serial_com' in locals() and serial_com.is_open:
-            serial_com.close()
-            print(f"{serial_com.port} closed !")
+
+class SerialReader:
+    def __init__(self):
+        self.flags = CommandFlags()
+        self.frame_no = 0
+        os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+    def get_cmd_name(self, flag: int) -> str:
+        if flag == self.flags.START: return "START"
+        if flag == self.flags.RESUME: return "RESUME"
+        if flag == self.flags.STOP: return "STOP"
+        return "UNKNOWN"
+
+    def send_command(self, serial_com: pyserial_lib.Serial, command_flag: int):
+        """Send 1-byte command to MSP430."""
+        cmd_bytes = pyserial_lib.to_bytes([command_flag])
+        print(f"[CMD] Sending 0x{command_flag:02X} ({self.get_cmd_name(command_flag)})")
+        serial_com.write(cmd_bytes)
+        echo_response = serial_com.read(1)
+        if echo_response == cmd_bytes:
+            print(f"[ACK] Command 0x{command_flag:02X} confirmed.")
+        else:
+            print(f"[WARN] Echo mismatch. Got {echo_response}")
+
+    def save_bin_from_sample(self):
+        """Convert sample_data.txt to binary file."""
+        with open(FILE_NAME, "r") as f:
+            text = f.read()
+
+        # Extract only valid hex bytes (ignores # and newlines)
+        hex_bytes = [b for b in text.split() if b.startswith("0x")]
+        if not hex_bytes:
+            print("[WARN] sample_data.txt is empty or invalid.")
+            return None
+
+        data = bytes(int(b, 16) for b in hex_bytes)
+        fname = f"frame_{self.frame_no:04d}.bin"
+        bin_path = os.path.join(OUTPUT_DIR, fname)
+
+        with open(bin_path, "wb") as fbin:
+            fbin.write(data)
+
+        print(f"[SAVE] Frame {self.frame_no} saved -> {bin_path} ({len(data)} bytes)")
+        return bin_path
+
+    def clear_sample_file(self):
+        """Erase sample_data.txt content."""
+        open(FILE_NAME, "w").close()
+        print("[INFO] Cleared sample_data.txt")
+
+    def run_test_cycle(self):
+        """Main interactive test loop."""
+        with open(FILE_NAME, "a") as f:
+            print(f"[INFO] Recording LIDAR data to '{os.path.abspath(f.name)}'")
+            print("-" * 50)
+
+            try:
+                serial_com = pyserial_lib.Serial(port=PORT, baudrate=BAUDRATE, timeout=1)
+                print(f"[OPEN] {serial_com.port} @ {BAUDRATE}")
+                time.sleep(2)
+                self.send_command(serial_com, self.flags.START)
+                print("[INFO] Started measurement cycle.")
+
+                buffer = bytearray()
+
+                while True:
+                    if serial_com.in_waiting > 0:
+                        chunk = serial_com.read(serial_com.in_waiting or 1)
+                        if chunk:
+                            buffer.extend(chunk)
+                            hex_line = ' '.join(f'0x{b:02X}' for b in chunk) + '\n'
+                            if not DEBUG:
+                                f.write(hex_line)
+                            print(hex_line.strip())
+
+                            # detect end marker (FF FF FF FF)
+                            if END_MARKER in buffer:
+                                self.frame_no += 1
+                                print(f"\n[INFO] End marker detected! Frame {self.frame_no} ready.")
+                                
+                                self.save_bin_from_sample()
+                                self.clear_sample_file()
+                                time.sleep(1)
+                                self.send_command(serial_com, self.flags.RESUME)
+                                print("[INFO] Resume command sent.")
+                                
+                                buffer.clear()
+                                print("-" * 40)
+                    else:
+                        time.sleep(0.01)
+
+            except KeyboardInterrupt:
+                print("\n[INTERRUPT] Stopping by user.")
+
+            finally:
+                if 'serial_com' in locals() and serial_com.is_open:
+                    serial_com.close()
+                    print(f"[CLOSE] {serial_com.port} closed.")
+
+
+if __name__ == "__main__":
+    SerialReader().run_test_cycle()

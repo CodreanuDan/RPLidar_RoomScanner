@@ -1,4 +1,4 @@
-t/*********************************************************
+/*********************************************************
 
                MSP430FR2355
           ^  -----------------
@@ -16,11 +16,22 @@ t/*********************************************************
             |     P4.1/       |<---- Buton get_info, start
             |     P2.3/       |<---- Buton force_start
             |                 |
+            |     P1.2/       |----> Motor Lidar
+            |                 |
  *** >>Baud Rate A1 PC    @ 115200bps
  *** >>Baud Rate A0 LIDAR @ 115200bps
  ***********************************************************/
 #include <msp430.h>
 #include <stdint.h>
+
+/*
+ * Settings
+ */
+#define NEW_UART1_TX 1
+#define OLD_UART1_TX 0
+
+#define TIMER_B_1_SEC 0
+#define TIMER_B_2_SEC 1
 
 /*
  * LIDAR COMMANDS AND RESPONSE FORMATS
@@ -33,10 +44,31 @@ const unsigned char stop_scan[2]        ={0xA5,0x25};                           
 const unsigned char get_health_status_resp[10] = {0xA5, 0x5A, 0x03, 0x00, 0x00, 0x00, 0x06, 0x0, 0x00, 0x00};   // get health status response
 const unsigned char start_scan_resp[7]  = {0xA5,0x5A,0x05,0x00,0x00,0x40,0x81};                                 // start scan response
 
+const unsigned char end_marker[4] = {0xFF,0xFF,0xFF,0xFF};
+
 /*
- * Varibles
+ * Global Varibles
  */
-volatile uint8_t i = 0;
+volatile uint8_t i;
+
+/*
+ * Lidar Ctrl control states
+ */
+typedef enum {
+    LIDAR_STATE_STOP = 0u,
+    LIDAR_STATE_IDLE,
+    LIDAR_STATE_MEAS
+} Lidar_States;
+
+volatile Lidar_States prevLidarState;
+volatile Lidar_States nextLidarState;
+
+/*
+ * Command messages from PC
+ */
+#define STOP_MEASUREMENT_CMD 0x00u
+#define START_MEASUREMENT_CYCLE_CMD 0x01u
+#define RESUME_MEASUREMENT_CMD 0x02u
 
 /*
  * Config Function prototypes
@@ -49,13 +81,24 @@ void Configure_UART0_LIDAR_115200();
 void Configure_UART1_PC_115200();
 void Configure_GPIO();
 
+/*
+ * LIDAR Measurement Control Functions
+ */
+void LidarCtrl_StopMeasurement();
+void LidarCtrl_StartMeasurement();
+void LidarCtrl_MainFunction();
+
 /**
  * main.c
  */
 int main(void)
 {
     /******************* Variabile *********************/
+    i = 0;
+    prevLidarState = LIDAR_STATE_IDLE;
+    nextLidarState = LIDAR_STATE_IDLE;
 
+    /************ CLEAR UART TX BUFFERS ****************/
 
     /**************** Configurare WDT ******************/
     Configuration_Callback(Configure_WDT);
@@ -83,6 +126,11 @@ int main(void)
     P2IFG &= ~BIT3;                             // P2.3 IFG cleared
     __enable_interrupt();                       // Interrupts enabled
     __no_operation();                           // For debugger
+
+    while(1)
+    {
+        LidarCtrl_MainFunction();
+    }
 }
 
 /*
@@ -124,65 +172,43 @@ void Configure_GPIO()
     P2IE |= BIT3;                                       // P1.3 interrupt enabled
 
     /*********** Configuram P1.0 --> Signal light ****************/
-    P1DIR |= BIT0;
-    P1OUT &=~BIT0;
+//    P1DIR |= BIT0;
+//    P1OUT &=~BIT0;
+
+    /*********** Configuram P6.6 --> Signal light ****************/
+//    P6DIR |= BIT6;
+//    P6OUT &=~BIT6;
+
+    /*********** Configuram P1.2 --> Pin Motor Lidar *************/
+    P1DIR |= BIT2;                                      // P1.2 as output
+    P1OUT &= ~BIT2;                                     // P1.2 OFF
 }
 
 /***  Port 2 interrupt service routine ----> STOP SCAN ***/
 #pragma vector=PORT2_VECTOR
 __interrupt void Port_2(void)
 {
-    P2IFG &= ~BIT3;                             // Clear P2.3 IFG
+    /* Clear P2.3 IFG */
+    P2IFG &= ~BIT3;
 
-    /*** GET HEALTH STATUS COMMAND : [0xA5 0x52] --> UART1: PC; UART0: LIDAR ***/
-    for(i = 0; i < 2; i++)
-    {
-        while(!(UCA1IFG&UCTXIFG));              // verifica daca nu se transmite ceva ( NU-s intreruperi pe UART adica )
-        UCA1TXBUF = stop_scan[i];               // trimite catre PC
-    }
+    /* SET STOP SCAN SEQUENCE FLAG */
+    nextLidarState = LIDAR_STATE_STOP;
 
-    for(i = 0; i < 2; i++)
-    {
-        while(!(UCA0IFG&UCTXIFG));              // verifica daca nu se transmite ceva ( NU-s intreruperi pe UART adica )
-        UCA0TXBUF = stop_scan[i];               // trimite catre LIDAR
-    }
 }
-
 
 
 /*** Port 4 interrupt service routine ----> START SCAN; Sequence: Get Health + Start scan ***/
 #pragma vector=PORT4_VECTOR
 __interrupt void Port_4(void)
 {
-    P4IFG &= ~BIT1;                             // Clear P4.1 IFG
+    /* Clear P4.1 IFG */
+    P4IFG &= ~BIT1;
 
-    /*** GET HEALTH STATUS COMMAND : [0xA5 0x52] --> UART1: PC; UART0: LIDAR ***/
-    for(i = 0; i <2 ; i++)
-    {
-        while(!(UCA1IFG&UCTXIFG));              // verifica daca nu se transmite ceva ( NU-s intreruperi pe UART adica )
-        UCA1TXBUF = get_health_status[i];       // trimite catre PC
-    }
-
-    for(i = 0; i < 2; i++)
-    {
-        while(!(UCA0IFG&UCTXIFG));              // verifica daca nu se transmite ceva ( NU-s intreruperi pe UART adica )
-        UCA0TXBUF = get_health_status[i];       // trimite catre LIDAR
-    }
-
-    /*** START SCAN COMMAND : [0xA5 0x20] --> UART1: PC; UART0: LIDAR **********/
-    for(i = 0; i < 2; i++)
-    {
-        while(!(UCA1IFG&UCTXIFG));              // verifica daca nu se transmite ceva ( NU-s intreruperi pe UART adica )
-        UCA1TXBUF = start_scan[i];              // trimite catre PC
-    }
-
-    for(i = 0; i < 2; i++)
-    {
-        while(!(UCA0IFG&UCTXIFG));              // verifica daca nu se transmite ceva ( NU-s intreruperi pe UART adica )
-        UCA0TXBUF = start_scan[i];              // trimite catre LIDAR
-    }
+    /* SET START SCAN SEQUENCE FLAG */
+    nextLidarState = LIDAR_STATE_MEAS;
 
 }
+
 
 /*
  * **********************************************************************************************
@@ -211,6 +237,7 @@ void Configure_CS()
     PM5CTL0 &= ~LOCKLPM5;                               // Disable the GPIO power-on default high-impedance mode
                                                         // to activate 1previously configured port settings
 }
+
 
 /*
  * **********************************************************************************************
@@ -286,20 +313,61 @@ void Configure_UART1_PC_115200()
 #pragma vector=USCI_A1_VECTOR
 __interrupt void USCI_A1_ISR(void)
 {
-switch(__even_in_range(UCA1IV,USCI_UART_UCTXCPTIFG))
-{
-    case USCI_NONE: break;
-    case USCI_UART_UCRXIFG:
-        while(!(UCA1IFG&UCTXIFG));          // verifica daca poate transmite catre PC ( NU-s intreruperi pe UART TX adica )
-        UCA1TXBUF = UCA1RXBUF;              // transmite catre PC pachetul receptionat de la UART0 care a receptionat de la LIDAR
-        __no_operation();
-        break;
-    case USCI_UART_UCTXIFG: break;
-    case USCI_UART_UCSTTIFG: break;
-    case USCI_UART_UCTXCPTIFG: break;
-    default: break;
+#if OLD_UART1_TX == 1
+    switch(__even_in_range(UCA1IV,USCI_UART_UCTXCPTIFG))
+    {
+        case USCI_NONE: break;
+        case USCI_UART_UCRXIFG:
+            while(!(UCA1IFG&UCTXIFG));          // verifica daca poate transmite catre PC ( NU-s intreruperi pe UART TX adica )
+            UCA1TXBUF = UCA1RXBUF;              // echo TX-RX
+            __no_operation();
+            break;
+        case USCI_UART_UCTXIFG: break;
+        case USCI_UART_UCSTTIFG: break;
+        case USCI_UART_UCTXCPTIFG: break;
+        default: break;
     }
+#endif
+
+#if NEW_UART1_TX == 1
+    switch(__even_in_range(UCA1IV,USCI_UART_UCTXCPTIFG))
+    {
+        case USCI_NONE: break;
+        case USCI_UART_UCRXIFG:
+        {
+            uint8_t command_byte = UCA1RXBUF;
+
+            if (command_byte == START_MEASUREMENT_CYCLE_CMD)
+            {
+                // Cmd 0x01: Incepe primul ciclu de masurare
+                nextLidarState = LIDAR_STATE_MEAS;
+            }
+            else if (command_byte == RESUME_MEASUREMENT_CMD)
+            {
+                // Cmd 0x02: Reia masuratoarea (MSP430 iese din PAUSE)
+                nextLidarState = LIDAR_STATE_MEAS;
+            }
+            else if (command_byte == STOP_MEASUREMENT_CMD)
+            {
+                // Cmd 0x00: LIDAR_STATE_STOP tot
+                nextLidarState = LIDAR_STATE_STOP;
+            }
+
+            while(!(UCA1IFG&UCTXIFG));          // verifica daca poate transmite catre PC ( NU-s intreruperi pe UART TX adica )
+            UCA1TXBUF = command_byte;           // Echo back the command
+
+            __no_operation();
+            break;
+        }
+        case USCI_UART_UCTXIFG: break;
+        case USCI_UART_UCSTTIFG: break;
+        case USCI_UART_UCTXCPTIFG: break;
+        default: break;
+    }
+#endif
+
 }
+
 
 
 
@@ -315,16 +383,19 @@ __interrupt void USCI_A0_ISR(void)
     {
         case USCI_NONE: break;
         case USCI_UART_UCRXIFG:
+        {
             while(!(UCA1IFG&UCTXIFG));     // verifica daca poate transmite catre PC ( NU-s intreruperi pe UART RX adica )
             UCA1TXBUF = UCA0RXBUF;         // transmite catre UART 1 TX pachetul receptionat de la LIDAR prin UART0
             __no_operation();
             break;
+        }
         case USCI_UART_UCTXIFG: break;
         case USCI_UART_UCSTTIFG: break;
         case USCI_UART_UCTXCPTIFG: break;
         default: break;
     }
 }
+
 
 /*
  * **********************************************************************************************
@@ -338,11 +409,22 @@ __interrupt void USCI_A0_ISR(void)
  */
 void Configure_TimerB()
 {
-    // Configure Timer_B0 in up mode
-    TB0CTL = TBSSEL_1 | MC_1 | TBCLR; // ACLK, up mode, clear timer
 
-    // Set CCR0 for desired period (e.g., 1 Hz: 32768 / 1 = 32768)
+#if TIMER_B_1_SEC == 1
+    // Configure Timer_B0 in Stop Mode until measurement is triggered
+    TB0CTL = TBSSEL_1 | MC_0 | TBCLR; // ACLK, Stop mode: Timer is halted, clear timer
+
+    /* Set CCR0 for desired period (e.g., 1 Hz: 32768 / 1 = 32768) */
     TB0CCR0 = 32768; // Period = 1 second (adjust as needed)
+#endif
+
+#if TIMER_B_2_SEC == 1
+    // Configure Timer_B0 in Stop Mode until measurement is triggered
+    TB0CTL = TBSSEL_1 | ID__2 | MC_0 | TBCLR; // ACLK, Stop mode: Timer is halted, clear timer, ID_2 for 2 second cycle
+
+    /* Set CCR0 for desired period (e.g., 0.5 Hz: 32768 / 1 = 32768) */
+    TB0CCR0 = 32768; // Period = 2 second (adjust as needed)
+#endif
 
     // Enable CCR0 interrupt
     TB0CCTL0 = CCIE;
@@ -356,8 +438,17 @@ void Configure_TimerB()
 #pragma vector = TIMER0_B0_VECTOR
 __interrupt void Timer_B (void)
 {
-    P1OUT ^= BIT0;
+
+    /* SET STOP SCAN SEQUENCE FLAG */
+    nextLidarState = LIDAR_STATE_IDLE;
+
+    /***********************************************************
+     * Stop Timer B from counting after the scan is stopped
+     ***********************************************************/
+    TB0CTL &= ~ (MC_1 | MC_2 | MC_3);           // Clear old MC bits
+    TB0CTL |=  MC_0;                            // Stop mode: Timer is halted
 }
+
 
 /*
  * **********************************************************************************************
@@ -368,4 +459,124 @@ __interrupt void Timer_B (void)
 void Configure_WDT()
 {
     WDTCTL = WDTPW | WDTHOLD;                 // Stop watchdog timer
+}
+
+
+
+/*
+ * **********************************************************************************************
+ *                                     LIDAR CTRL FUNCTIONS
+ * **********************************************************************************************
+ */
+
+/*
+ * Function name: LidarCtrl_StopMeasurement
+ * Stop scan sequence:
+ * 1. Send STOP CMD 0xA5 0x25
+ * 2. Stop Lidar Motor
+ */
+void LidarCtrl_StopMeasurement()
+{
+    /*** STOP SCAN COMMAND : [0xA5 0x25] --> UART1: PC; UART0: LIDAR ***/
+    for(i = 0; i < 2; i++)
+    {
+        while(!(UCA1IFG&UCTXIFG));              // verifica daca nu se transmite ceva ( NU-s intreruperi pe UART adica )
+        UCA1TXBUF = stop_scan[i];               // trimite catre PC
+    }
+
+    for(i = 0; i < 2; i++)
+    {
+        while(!(UCA0IFG&UCTXIFG));              // verifica daca nu se transmite ceva ( NU-s intreruperi pe UART adica )
+        UCA0TXBUF = stop_scan[i];               // trimite catre LIDAR
+    }
+
+    /* Send end_marker to PC */
+    for (i = 0; i < 4; i++)
+    {
+        while(!(UCA1IFG & UCTXIFG));
+        UCA1TXBUF = end_marker[i];
+    }
+
+    P1OUT &= ~BIT2;                             // STOP LIDAR MOTOR
+}
+
+/*
+ * Function name: LidarCtrl_StartMeasurement
+ * Start scan sequence:
+ * 1. Start Lidar Motor
+ * 2. Send GET HEALTH STATUS CMD 0xA5 0x52
+ * 3. Send START SCAN CMD 0xA5 0x20
+ * 4. Strat Timer B counter mode
+ */
+void LidarCtrl_StartMeasurement()
+{
+    P1OUT |= BIT2;                              // Start LIDAR Motor
+
+    /*** GET HEALTH STATUS COMMAND : [0xA5 0x52] --> UART1: PC; UART0: LIDAR ***/
+    for(i = 0; i <2 ; i++)
+    {
+        while(!(UCA1IFG&UCTXIFG));              // verifica daca nu se transmite ceva ( NU-s intreruperi pe UART adica )
+        UCA1TXBUF = get_health_status[i];       // trimite catre PC
+    }
+
+    for(i = 0; i < 2; i++)
+    {
+        while(!(UCA0IFG&UCTXIFG));              // verifica daca nu se transmite ceva ( NU-s intreruperi pe UART adica )
+        UCA0TXBUF = get_health_status[i];       // trimite catre LIDAR
+    }
+
+    /*** START SCAN COMMAND : [0xA5 0x20] --> UART1: PC; UART0: LIDAR **********/
+    for(i = 0; i < 2; i++)
+    {
+        while(!(UCA1IFG&UCTXIFG));              // verifica daca nu se transmite ceva ( NU-s intreruperi pe UART adica )
+        UCA1TXBUF = start_scan[i];              // trimite catre PC
+    }
+
+    for(i = 0; i < 2; i++)
+    {
+        while(!(UCA0IFG&UCTXIFG));              // verifica daca nu se transmite ceva ( NU-s intreruperi pe UART adica )
+        UCA0TXBUF = start_scan[i];              // trimite catre LIDAR
+    }
+
+    /**********************************************************
+     * Start Timer B in UP mode to run for 1 second.
+     **********************************************************/
+     TB0CTL |= MC_1;                             // Set to Up mode (Timer starts counting)
+}
+
+
+/*
+ * Function name: LidarCtrl_MainFunction
+ *
+ */
+void LidarCtrl_MainFunction()
+{
+    /* Check if a state transition occurs */
+    if (prevLidarState != nextLidarState)
+    {
+        prevLidarState = nextLidarState;
+
+        switch(prevLidarState)
+        {
+            case LIDAR_STATE_IDLE:
+            {
+                LidarCtrl_StopMeasurement();
+                break;
+            }
+            case LIDAR_STATE_MEAS:
+            {
+                LidarCtrl_StartMeasurement();
+                break;
+            }
+            case LIDAR_STATE_STOP:
+                LidarCtrl_StopMeasurement();
+                break;
+            default:
+                break;
+        }
+    }
+    else
+    {
+        __no_operation();
+    }
 }
