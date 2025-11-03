@@ -18,6 +18,10 @@
             |                 |
             |     P1.2/       |----> Motor Lidar
             |                 |
+            |     P2.0/       |----> Servo Turret
+            | TB.0 >> Timing  |
+            | TB.1 >> Servo   |
+            ------------------
  *** >>Baud Rate A1 PC    @ 115200bps
  *** >>Baud Rate A0 LIDAR @ 115200bps
  ***********************************************************/
@@ -47,9 +51,25 @@ const unsigned char start_scan_resp[7]  = {0xA5,0x5A,0x05,0x00,0x00,0x40,0x81}; 
 const unsigned char end_marker[4] = {0xFF,0xFF,0xFF,0xFF};
 
 /*
+ * SERVO TIMING VALUES AND COUNTER
+ */
+
+/* --- Servo timing (pentru SMCLK = 20MHz cu prescaler /8) --- */
+#define SERVO_TIMER_PERIOD_COUNTS 50000u   // TB1CCR0 -> 20 ms @ (20MHz/8) = 2.5MHz => 2.5e6 * 0.02 = 50000
+#define SERVO_MIN_PULSE_COUNTS    1250u    // 0.5 ms
+#define SERVO_MAX_PULSE_COUNTS    6250u    // 2.5 ms
+
+
+#define SG90_180DEG 2750u
+#define SG90_0DEG   730u
+#define SG90_1DEG_INC  11u
+volatile uint8_t servo_pos;
+
+/*
  * Global Varibles
  */
 volatile uint8_t i;
+
 
 /*
  * Lidar Ctrl control states
@@ -88,6 +108,13 @@ void LidarCtrl_StopMeasurement();
 void LidarCtrl_StartMeasurement();
 void LidarCtrl_MainFunction();
 
+/*
+ * Servo Motor Control Functions
+ */
+void ServoCtrl_setAngle(uint8_t degrees);
+void ServoCtrl_testRange(int speed);
+void delay_ms(uint16_t ms);
+
 /**
  * main.c
  */
@@ -95,6 +122,7 @@ int main(void)
 {
     /******************* Variabile *********************/
     i = 0;
+    servo_pos = 0;
     prevLidarState = LIDAR_STATE_IDLE;
     nextLidarState = LIDAR_STATE_IDLE;
 
@@ -126,6 +154,10 @@ int main(void)
     P2IFG &= ~BIT3;                             // P2.3 IFG cleared
     __enable_interrupt();                       // Interrupts enabled
     __no_operation();                           // For debugger
+
+
+    /* Test the servo */
+    ServoCtrl_testRange(25);
 
     while(1)
     {
@@ -181,7 +213,13 @@ void Configure_GPIO()
 
     /*********** Configuram P1.2 --> Pin Motor Lidar *************/
     P1DIR |= BIT2;                                      // P1.2 as output
-    P1OUT &= ~BIT2;                                     // P1.2 OFF
+    P1OUT &= ~BIT2;
+    // P1.2 OFF
+    /*********** Configuram P2.0 --> Pin Motor Servo *************/
+    P2DIR |= BIT0;        // P2.0 as output
+    P2SEL0 |= BIT0;       // P2.0 TB1.1 option select
+    P2SEL1 &= ~BIT0;
+
 }
 
 /***  Port 2 interrupt service routine ----> STOP SCAN ***/
@@ -410,6 +448,7 @@ __interrupt void USCI_A0_ISR(void)
 void Configure_TimerB()
 {
 
+    /****** TB.0 -> Flow control/ Meaurement cycle *******/
 #if TIMER_B_1_SEC == 1
     // Configure Timer_B0 in Stop Mode until measurement is triggered
     TB0CTL = TBSSEL_1 | MC_0 | TBCLR; // ACLK, Stop mode: Timer is halted, clear timer
@@ -428,6 +467,13 @@ void Configure_TimerB()
 
     // Enable CCR0 interrupt
     TB0CCTL0 = CCIE;
+
+    /****** TB.1 -> Servo Control *******/
+    TB1CCR0 = SERVO_TIMER_PERIOD_COUNTS;   // PWM period = 20ms (50Hz) at SMCLK/8
+    TB1CCTL1 = OUTMOD_7;                   // Reset/set mode
+    TB1CCR1 = SERVO_MIN_PULSE_COUNTS + ((SERVO_MIN_PULSE_COUNTS + SERVO_MAX_PULSE_COUNTS)/2); // center-ish (option)
+    // SMCLK, up mode, divide by 8
+    TB1CTL = TBSSEL_2 | ID_3 | MC_1 | TBCLR;   // TBSSEL_2 = SMCLK, ID_3 => /8, MC_1 => up
 
 }
 
@@ -497,6 +543,8 @@ void LidarCtrl_StopMeasurement()
         UCA1TXBUF = end_marker[i];
     }
 
+    servo_pos = 0;
+
     P1OUT &= ~BIT2;                             // STOP LIDAR MOTOR
 }
 
@@ -560,6 +608,7 @@ void LidarCtrl_MainFunction()
         {
             case LIDAR_STATE_IDLE:
             {
+                ServoCtrl_setAngle(0);
                 LidarCtrl_StopMeasurement();
                 break;
             }
@@ -569,6 +618,7 @@ void LidarCtrl_MainFunction()
                 break;
             }
             case LIDAR_STATE_STOP:
+                ServoCtrl_setAngle(0);
                 LidarCtrl_StopMeasurement();
                 break;
             default:
@@ -579,4 +629,50 @@ void LidarCtrl_MainFunction()
     {
         __no_operation();
     }
+}
+
+/*
+ * **********************************************************************************************
+ *                                     SERVO CTRL FUNCTIONS
+ * **********************************************************************************************
+ */
+
+/*
+ * Function name: ServoCtrl_setAngle
+ *
+ */
+void ServoCtrl_setAngle(uint8_t degrees)
+{
+    /* degrees: 0 .. 180
+     * Map to pulse between SERVO_MIN_PULSE_COUNTS (1ms) and SERVO_MAX_PULSE_COUNTS (2ms)
+     * Using 32-bit intermediate to avoid overflow in multiplication.
+     */
+    if (degrees > 180) degrees = 180;
+
+    uint32_t range = (uint32_t)SERVO_MAX_PULSE_COUNTS - (uint32_t)SERVO_MIN_PULSE_COUNTS;
+    uint32_t ccr = (uint32_t)SERVO_MIN_PULSE_COUNTS + ((uint32_t)degrees * range) / 180u;
+    TB1CCR1 = (uint16_t) ccr;
+}
+
+/* Simple test  */
+void ServoCtrl_testRange(int speed)
+{
+    for (i = 0; i < 180; i++)
+    {
+        ServoCtrl_setAngle(i);
+        delay_ms(speed);
+    }
+
+    for (i = 180; i > 0 ; i--)
+    {
+        ServoCtrl_setAngle(i);
+        delay_ms(speed);
+    }
+}
+
+/* Simple delay in ms */
+void delay_ms(uint16_t ms)
+{
+    while(ms--)
+        __delay_cycles(20000);   // 20,000 cycles = 1 ms @ 20 MHz
 }
