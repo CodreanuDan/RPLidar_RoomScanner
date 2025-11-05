@@ -21,6 +21,10 @@
             |     P2.0/       |----> Servo Turret
             | TB.0 >> Timing  |
             | TB.1 >> Servo   |
+            |                 |
+            |         RPLIDAR |---->  5.0V
+            |     LIDAR MOTOR |---->  5.0V
+            |    TURRET SERVO |---->  3.3V
             ------------------
  *** >>Baud Rate A1 PC    @ 115200bps
  *** >>Baud Rate A0 LIDAR @ 115200bps
@@ -49,6 +53,7 @@ const unsigned char get_health_status_resp[10] = {0xA5, 0x5A, 0x03, 0x00, 0x00, 
 const unsigned char start_scan_resp[7]  = {0xA5,0x5A,0x05,0x00,0x00,0x40,0x81};                                 // start scan response
 
 const unsigned char end_marker[4] = {0xFF,0xFF,0xFF,0xFF};
+const unsigned char end_cycle_marker[4] = {0xFF,0xFF,0xFA,0xFA};
 
 /*
  * SERVO TIMING VALUES AND COUNTER
@@ -156,8 +161,10 @@ int main(void)
     __no_operation();                           // For debugger
 
 
-    /* Test the servo */
+    /* Test the servo / Set initial position */
     ServoCtrl_testRange(25);
+//    delay_ms(100);
+//    ServoCtrl_setAngle(0);
 
     while(1)
     {
@@ -543,7 +550,26 @@ void LidarCtrl_StopMeasurement()
         UCA1TXBUF = end_marker[i];
     }
 
-    servo_pos = 0;
+    /*
+     * Control the turret:
+     * -If the servo position is < 180 degress move one step for each measurement
+     * -If the servo position is = 180 degress reset servo position and stop measurements and send stop flag
+     */
+    if (servo_pos < 180)
+    {
+        servo_pos+=1;
+        ServoCtrl_setAngle(servo_pos);
+    }
+    else if (servo_pos >= 180)
+    {
+        ServoCtrl_setAngle(0);
+        for (i = 0; i < 4; i++)
+        {
+            while(!(UCA1IFG & UCTXIFG));
+            UCA1TXBUF = end_cycle_marker[i];
+        }
+    }
+    delay_ms(2);
 
     P1OUT &= ~BIT2;                             // STOP LIDAR MOTOR
 }

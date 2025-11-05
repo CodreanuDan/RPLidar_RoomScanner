@@ -10,7 +10,7 @@ PORT = "COM5"
 DEBUG = False
 
 END_MARKER = bytes([0xFF, 0xFF, 0xFF, 0xFF])  # STOP frame marker
-
+END_CYCLE_MARKER = bytes([0xFF, 0xFF, 0xFA, 0xFA])  # STOP cycle marker
 
 class CommandFlags:
     STOP   = 0x00
@@ -105,6 +105,17 @@ class SerialReader:
                                 
                                 buffer.clear()
                                 print("-" * 40)
+                                
+                            # detect end cycle marker (FF FF FA FA)
+                            if END_MARKER in buffer:
+                                print("\n[INFO] End of test cycle detected!")
+                                self.save_bin_from_sample()
+                                self.clear_sample_file()
+
+                                # stop requesting new data
+                                print("[INFO] Stopping serial communication and exiting test cycle.")
+                                serial_com.close()
+                                break  
                     else:
                         time.sleep(0.01)
 
