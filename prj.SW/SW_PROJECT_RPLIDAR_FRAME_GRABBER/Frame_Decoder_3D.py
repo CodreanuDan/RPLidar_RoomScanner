@@ -4,14 +4,15 @@ import os
 import math
 import matplotlib.pyplot as plt
 import numpy as np
+import plotly.graph_objects as go
 
 # Set folder path
 frames_folder = os.path.join(os.path.dirname(os.path.abspath(__file__)), "frames")
 output_excel = "LidarParsed.xlsx"
 output_png = "Lidar3D.png"
 
-ANGLE_PER_FRAME = 1.0  # unghi pe frame (în grade)
-FILTER_STD_FACTOR = 2  # filtrează punctele care sunt la mai mult de 2 std dev de media
+ANGLE_PER_FRAME = 1.0  # turret rotation per frame (degrees)
+FILTER_STD_FACTOR = 2.5  # filter outliers beyond 2.5 std dev
 
 def read_bin_data(filename: str) -> bytes:
     try:
@@ -40,8 +41,24 @@ def get_start_idx_for_measurements(data: bytes) -> int:
     START_SCAN_RESPONSE = b'\xA5\x5A\x05\x00\x00\x40\x81'
     return data.find(START_SCAN_RESPONSE)
 
-def get_valid_measurement_from_sample_data(scan_data: bytes, z_angle_deg: float) -> List[Dict]:
+def get_valid_measurement_from_sample_data(scan_data: bytes, turret_angle_deg: float) -> List[Dict]:
+    """
+    CORRECT Physical Setup:
+    - LIDAR mounted VERTICALLY on turret
+    - LIDAR spins 360° creating a vertical circular slice
+    - Turret rotates 0-180° sweeping this slice horizontally
+    
+    Coordinate transformation:
+    - angle_deg (0-360°): LIDAR's rotation angle in its vertical plane
+    - turret_angle_deg (0-180°): horizontal rotation of turret
+    
+    Result: 
+    - When turret = 0°-90°: scans front half of room
+    - When turret = 90°-180°: scans back half of room
+    - Combined: full 360° room coverage
+    """
     measurements = []
+    
     for i in range(0, len(scan_data), 5):
         if i + 4 >= len(scan_data):
             break
@@ -50,39 +67,88 @@ def get_valid_measurement_from_sample_data(scan_data: bytes, z_angle_deg: float)
         not_s_flag = (b0 >> 1) & 0x01
         check_bit = (b0 >> 2) & 0x01
         quality = b0 >> 3
+        
         if check_bit != 1 or s_flag == not_s_flag:
             continue
 
         distance_q2 = (b4 << 8) | b3
         distance_mm = distance_q2 / 4.0
-        if distance_mm == 0:
+        if distance_mm == 0 or distance_mm > 12000:  # filter unrealistic distances
             continue
 
         angle_q6 = (b2 << 7) + (b1 & 0x7F)
         angle_deg = angle_q6 / 64.0
         angle_deg = angle_deg % 360.0
-        angle_rad = math.radians(angle_deg)
-
-        coord_x = distance_mm * math.cos(angle_rad)
-        coord_y = distance_mm * math.sin(angle_rad)
-
-        # transformare în coordonate globale ținând cont de rotația turelei
-        z_rad = math.radians(z_angle_deg)
-        x_global = coord_x * math.cos(z_rad) - coord_y * math.sin(z_rad)
-        y_global = coord_x * math.sin(z_rad) + coord_y * math.cos(z_rad)
-
+        
+        # Convert to radians
+        lidar_angle_rad = math.radians(angle_deg)
+        turret_rad = math.radians(turret_angle_deg)
+        
+        # LIDAR spinning vertically creates a circle in the vertical plane
+        # The LIDAR's "forward" direction rotates with the turret
+        
+        # Step 1: LIDAR's local coordinates (vertical circle)
+        # Assuming angle_deg=0 points "forward" from LIDAR, angle_deg=90 points "up"
+        # This creates a vertical circle perpendicular to turret axis
+        
+        # Distance components in LIDAR's local frame:
+        # - Forward/back component (along turret's viewing direction)
+        forward_dist = distance_mm * math.cos(lidar_angle_rad)
+        # - Up/down component (height)
+        z_height = distance_mm * math.sin(lidar_angle_rad)
+        
+        # Step 2: Rotate forward_dist by turret angle to get X,Y in room coordinates
+        # Turret at 0° points in one direction, 180° points opposite
+        x_global = forward_dist * math.sin(turret_rad)
+        y_global = forward_dist * math.cos(turret_rad)
+        z_global = z_height
+        
         measurements.append({
             "Index": i,
             "Quality": quality,
-            "Angle (deg)": int(angle_deg),
+            "LIDAR_Angle (deg)": round(angle_deg, 1),
             "Distance (mm)": int(distance_mm),
-            "X_local": round(coord_x, 2),
-            "Y_local": round(coord_y, 2),
-            "Z_angle (deg)": z_angle_deg,
-            "X_global": round(x_global, 2),
-            "Y_global": round(y_global, 2)
+            "Turret_Angle (deg)": turret_angle_deg,
+            "X (mm)": round(x_global, 2),
+            "Y (mm)": round(y_global, 2),
+            "Z (mm)": round(z_global, 2)
         })
     return measurements
+
+def save_interactive_3d_plot(df_filtered: pd.DataFrame, output_html: str):
+    print("[INFO] Generating interactive 3D plot...")
+
+    fig = go.Figure(
+        data=[
+            go.Scatter3d(
+                x=df_filtered["X (mm)"],
+                y=df_filtered["Y (mm)"],
+                z=df_filtered["Z (mm)"],
+                mode='markers',
+                marker=dict(
+                    size=2,
+                    color=df_filtered["Z (mm)"],
+                    colorscale='Viridis',
+                    opacity=0.7
+                )
+            )
+        ]
+    )
+
+    fig.update_layout(
+        title="LIDAR 3D Room Scan (Interactive)",
+        scene=dict(
+            xaxis_title='X (mm) - Width',
+            yaxis_title='Y (mm) - Depth',
+            zaxis_title='Z (mm) - Height',
+            aspectmode='data'
+        ),
+        width=1200,
+        height=900
+    )
+
+    fig.write_html(output_html)
+    print(f"--> Interactive 3D plot saved as: {output_html}")
 
 def decode_all_bin_files(frames_folder: str, output_excel: str):
     all_measurements = []
@@ -105,50 +171,131 @@ def decode_all_bin_files(frames_folder: str, output_excel: str):
 
             scan_data = data[start_idx + 7:]
             frame_no = int(''.join(filter(str.isdigit, file)))
-            z_angle = frame_no * ANGLE_PER_FRAME
+            turret_angle = frame_no * ANGLE_PER_FRAME
 
-            measurements = get_valid_measurement_from_sample_data(scan_data, z_angle)
+            measurements = get_valid_measurement_from_sample_data(scan_data, turret_angle)
             all_measurements.extend(measurements)
             all_commands.extend(commands)
+
+    if not all_measurements:
+        print("No measurements found!")
+        return
 
     df = pd.DataFrame(all_measurements)
     df_commands = pd.DataFrame(all_commands)
 
-    # filter outlier
-    mean_x, std_x = df['X_global'].mean(), df['X_global'].std()
-    mean_y, std_y = df['Y_global'].mean(), df['Y_global'].std()
-    mask = (df['X_global'] >= mean_x - FILTER_STD_FACTOR*std_x) & (df['X_global'] <= mean_x + FILTER_STD_FACTOR*std_x) & \
-           (df['Y_global'] >= mean_y - FILTER_STD_FACTOR*std_y) & (df['Y_global'] <= mean_y + FILTER_STD_FACTOR*std_y)
-    df_filtered = df[mask]
+    print(f"Total measurements before filtering: {len(df)}")
 
-    # salvare Excel
+    # Filter outliers
+    mean_x, std_x = df['X (mm)'].mean(), df['X (mm)'].std()
+    mean_y, std_y = df['Y (mm)'].mean(), df['Y (mm)'].std()
+    mean_z, std_z = df['Z (mm)'].mean(), df['Z (mm)'].std()
+    
+    mask = (
+        (df['X (mm)'] >= mean_x - FILTER_STD_FACTOR*std_x) & 
+        (df['X (mm)'] <= mean_x + FILTER_STD_FACTOR*std_x) & 
+        (df['Y (mm)'] >= mean_y - FILTER_STD_FACTOR*std_y) & 
+        (df['Y (mm)'] <= mean_y + FILTER_STD_FACTOR*std_y) &
+        (df['Z (mm)'] >= mean_z - FILTER_STD_FACTOR*std_z) & 
+        (df['Z (mm)'] <= mean_z + FILTER_STD_FACTOR*std_z)
+    )
+    df_filtered = df[mask]
+    df_filtered = df_filtered.rename(columns={"Y (mm)": "Z (mm)", "Z (mm)": "Y (mm)"})
+
+
+    # Save Excel
     with pd.ExcelWriter(output_excel) as writer:
         df_commands.to_excel(writer, sheet_name="Commands", index=False)
         df.to_excel(writer, sheet_name="Measurements", index=False)
         df_filtered.to_excel(writer, sheet_name="Measurements_Filtered", index=False)
 
     print(f"--> OUTPUT FILE: {output_excel}")
-    print(f"--> Total CMD Count: {len(all_commands)} | Total measurements count: {len(all_measurements)} | Filtered count: {len(df_filtered)}")
+    print(f"--> Total CMD Count: {len(all_commands)} | Total measurements: {len(all_measurements)} | Filtered: {len(df_filtered)}")
 
-    # plot 3D
-    fig = plt.figure(figsize=(12, 9))
+    # Print statistics
+    print(f"\nRoom dimensions (mm):")
+    print(f"  X range: {df_filtered['X (mm)'].min():.0f} to {df_filtered['X (mm)'].max():.0f} (width: {df_filtered['X (mm)'].max() - df_filtered['X (mm)'].min():.0f})")
+    print(f"  Y range: {df_filtered['Y (mm)'].min():.0f} to {df_filtered['Y (mm)'].max():.0f} (depth: {df_filtered['Y (mm)'].max() - df_filtered['Y (mm)'].min():.0f})")
+    print(f"  Z range: {df_filtered['Z (mm)'].min():.0f} to {df_filtered['Z (mm)'].max():.0f} (height: {df_filtered['Z (mm)'].max() - df_filtered['Z (mm)'].min():.0f})")
+
+    # Plot 3D - ROOM VIEW
+    fig = plt.figure(figsize=(16, 12))
     ax = fig.add_subplot(111, projection='3d')
 
-    xs = df_filtered['X_global']
-    ys = df_filtered['Y_global']
-    zs = df_filtered['Z_angle (deg)']
-    sc = ax.scatter(xs, ys, zs, c=df_filtered['Quality'], cmap='viridis', s=10, marker='o')
+    xs = df_filtered['X (mm)']
+    ys = df_filtered['Y (mm)']
+    zs = df_filtered['Z (mm)']
+    
+    # Color by height (Z) for better room visualization
+    sc = ax.scatter(xs, ys, zs, c=zs, cmap='viridis', s=0.5, marker='o', alpha=0.6)
 
-    ax.set_xlabel('X (mm)')
-    ax.set_ylabel('Y (mm)')
-    ax.set_zlabel('Turret Rotation (deg)')
-    ax.set_title('LIDAR 3D Measurements - Circular Layout (Filtered)')
-    plt.colorbar(sc, label='Quality')
+    ax.set_xlabel('X (mm) - Room Width', fontsize=12)
+    ax.set_ylabel('Y (mm) - Room Depth', fontsize=12)
+    ax.set_zlabel('Z (mm) - Room Height', fontsize=12)
+    ax.set_title('LIDAR 3D Room Scan - Full 360° Coverage\n(Turret 180° × LIDAR 360° = Complete Room)', fontsize=14)
+    
+    # Set viewing angle for better perspective
+    ax.view_init(elev=20, azim=45)
+    
+    plt.colorbar(sc, label='Height (mm)', shrink=0.5, pad=0.1)
 
-    # salvare PNG
-    plt.savefig(output_png, dpi=300)
+    # Save PNG
+    plt.savefig(output_png, dpi=300, bbox_inches='tight')
     print(f"--> 3D plot saved as: {output_png}")
-    plt.show()
+    
+    # Create additional views
+    fig2, axes = plt.subplots(2, 2, figsize=(16, 14))
+    
+    # Top view (X-Y plane) - Floor plan
+    sc1 = axes[0, 0].scatter(xs, ys, c=zs, cmap='viridis', s=1, alpha=0.6)
+    axes[0, 0].set_xlabel('X (mm)', fontsize=11)
+    axes[0, 0].set_ylabel('Y (mm)', fontsize=11)
+    axes[0, 0].set_title('Top View (Floor Plan) - Colored by Height', fontsize=12)
+    axes[0, 0].set_aspect('equal')
+    axes[0, 0].grid(True, alpha=0.3)
+    axes[0, 0].axhline(y=0, color='r', linestyle='--', linewidth=0.5, alpha=0.5)
+    axes[0, 0].axvline(x=0, color='r', linestyle='--', linewidth=0.5, alpha=0.5)
+    plt.colorbar(sc1, ax=axes[0, 0], label='Height (mm)')
+    
+    # Front view (X-Z plane)
+    sc2 = axes[0, 1].scatter(xs, zs, c=ys, cmap='plasma', s=1, alpha=0.6)
+    axes[0, 1].set_xlabel('X (mm)', fontsize=11)
+    axes[0, 1].set_ylabel('Z (mm) - Height', fontsize=11)
+    axes[0, 1].set_title('Front View - Colored by Depth', fontsize=12)
+    axes[0, 1].set_aspect('equal')
+    axes[0, 1].grid(True, alpha=0.3)
+    axes[0, 1].axhline(y=0, color='r', linestyle='--', linewidth=0.5, alpha=0.5)
+    axes[0, 1].axvline(x=0, color='r', linestyle='--', linewidth=0.5, alpha=0.5)
+    plt.colorbar(sc2, ax=axes[0, 1], label='Depth (mm)')
+    
+    # Side view (Y-Z plane)
+    sc3 = axes[1, 0].scatter(ys, zs, c=xs, cmap='cool', s=1, alpha=0.6)
+    axes[1, 0].set_xlabel('Y (mm)', fontsize=11)
+    axes[1, 0].set_ylabel('Z (mm) - Height', fontsize=11)
+    axes[1, 0].set_title('Side View - Colored by Width', fontsize=12)
+    axes[1, 0].set_aspect('equal')
+    axes[1, 0].grid(True, alpha=0.3)
+    axes[1, 0].axhline(y=0, color='r', linestyle='--', linewidth=0.5, alpha=0.5)
+    axes[1, 0].axvline(x=0, color='r', linestyle='--', linewidth=0.5, alpha=0.5)
+    plt.colorbar(sc3, ax=axes[1, 0], label='Width (mm)')
+    
+    # Turret angle coverage
+    axes[1, 1].hist(df_filtered['Turret_Angle (deg)'], bins=180, color='skyblue', edgecolor='black')
+    axes[1, 1].set_xlabel('Turret Angle (degrees)', fontsize=11)
+    axes[1, 1].set_ylabel('Point Count', fontsize=11)
+    axes[1, 1].set_title('Turret Rotation Coverage (should be 0-180°)', fontsize=12)
+    axes[1, 1].grid(True, alpha=0.3)
+    axes[1, 1].set_xlim(0, 180)
+    
+    plt.tight_layout()
+    plt.savefig('Lidar_MultiView.png', dpi=300, bbox_inches='tight')
+    print(f"--> Multi-view plot saved as: Lidar_MultiView.png")
+    
+    #plt.show()
+    return df_filtered
 
 if __name__ == "__main__":
-    decode_all_bin_files(frames_folder, output_excel)
+    df_filtered = decode_all_bin_files(frames_folder, output_excel)
+    if df_filtered is not None and not df_filtered.empty:
+        interactive_html = "Lidar3D_Interactive.html"
+        save_interactive_3d_plot(df_filtered, interactive_html)

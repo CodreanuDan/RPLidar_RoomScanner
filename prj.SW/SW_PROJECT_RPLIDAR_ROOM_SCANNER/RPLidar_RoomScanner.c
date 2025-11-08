@@ -118,6 +118,7 @@ void LidarCtrl_MainFunction();
  */
 void ServoCtrl_setAngle(uint8_t degrees);
 void ServoCtrl_testRange(int speed);
+void ServoCtrl_moveDuringScan(uint8_t deg);
 void delay_ms(uint16_t ms);
 
 /**
@@ -162,9 +163,8 @@ int main(void)
 
 
     /* Test the servo / Set initial position */
-    ServoCtrl_testRange(25);
-//    delay_ms(100);
-//    ServoCtrl_setAngle(0);
+    ServoCtrl_setAngle(0);
+    delay_ms(100);
 
     while(1)
     {
@@ -385,6 +385,8 @@ __interrupt void USCI_A1_ISR(void)
             if (command_byte == START_MEASUREMENT_CYCLE_CMD)
             {
                 // Cmd 0x01: Incepe primul ciclu de masurare
+                servo_pos = 0;
+                ServoCtrl_setAngle(0);
                 nextLidarState = LIDAR_STATE_MEAS;
             }
             else if (command_byte == RESUME_MEASUREMENT_CMD)
@@ -397,6 +399,7 @@ __interrupt void USCI_A1_ISR(void)
                 // Cmd 0x00: LIDAR_STATE_STOP tot
                 nextLidarState = LIDAR_STATE_STOP;
             }
+
 
             while(!(UCA1IFG&UCTXIFG));          // verifica daca poate transmite catre PC ( NU-s intreruperi pe UART TX adica )
             UCA1TXBUF = command_byte;           // Echo back the command
@@ -550,28 +553,29 @@ void LidarCtrl_StopMeasurement()
         UCA1TXBUF = end_marker[i];
     }
 
-    /*
-     * Control the turret:
-     * -If the servo position is < 180 degress move one step for each measurement
-     * -If the servo position is = 180 degress reset servo position and stop measurements and send stop flag
-     */
-    if (servo_pos < 180)
+    P1OUT &= ~BIT2;                             // STOP LIDAR MOTOR
+    delay_ms(100);
+
+    /* If the measurement is complete send END CYCLE MARKER to stop the frame grabber */
+    if (nextLidarState == LIDAR_STATE_STOP)
     {
-        servo_pos+=1;
-        ServoCtrl_setAngle(servo_pos);
-    }
-    else if (servo_pos >= 180)
-    {
-        ServoCtrl_setAngle(0);
+        /* Full cycle complete - send end cycle marker */
         for (i = 0; i < 4; i++)
         {
             while(!(UCA1IFG & UCTXIFG));
             UCA1TXBUF = end_cycle_marker[i];
         }
     }
-    delay_ms(2);
+    else
+    {
+        /*
+         * Control the turret:
+         * -If the servo position is < 180 degress move one step for each measurement
+         * -If the servo position is = 180 degress reset servo position and stop measurements and send stop flag
+         */
+        ServoCtrl_moveDuringScan(1);
+    }
 
-    P1OUT &= ~BIT2;                             // STOP LIDAR MOTOR
 }
 
 /*
@@ -634,7 +638,6 @@ void LidarCtrl_MainFunction()
         {
             case LIDAR_STATE_IDLE:
             {
-                ServoCtrl_setAngle(0);
                 LidarCtrl_StopMeasurement();
                 break;
             }
@@ -644,8 +647,9 @@ void LidarCtrl_MainFunction()
                 break;
             }
             case LIDAR_STATE_STOP:
-                ServoCtrl_setAngle(0);
+                servo_pos = 0;
                 LidarCtrl_StopMeasurement();
+                ServoCtrl_setAngle(0);
                 break;
             default:
                 break;
@@ -694,6 +698,30 @@ void ServoCtrl_testRange(int speed)
         ServoCtrl_setAngle(i);
         delay_ms(speed);
     }
+}
+
+/* Move servo during scan */
+void ServoCtrl_moveDuringScan(uint8_t deg)
+{
+    /*
+     * Control the turret:
+     * Move servo BEFORE starting next scan
+     * -If the servo position is < 180 degress move one step for each measurement
+     * -If the servo position is = 180 degress reset servo position and stop measurements and send stop flag
+     */
+    if (servo_pos < 180)
+    {
+        servo_pos += deg;
+        ServoCtrl_setAngle(servo_pos);
+        delay_ms(300);                  // Wait for servo to settle
+    }
+    else if (servo_pos >= 180)
+    {
+        servo_pos = 0;
+        ServoCtrl_setAngle(0);
+        nextLidarState = LIDAR_STATE_STOP;
+    }
+
 }
 
 /* Simple delay in ms */

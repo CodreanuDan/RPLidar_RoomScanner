@@ -90,32 +90,32 @@ class SerialReader:
                             hex_line = ' '.join(f'0x{b:02X}' for b in chunk) + '\n'
                             if not DEBUG:
                                 f.write(hex_line)
-                            print(hex_line.strip())
+                            # print(hex_line.strip())
 
                             # detect end marker (FF FF FF FF)
                             if END_MARKER in buffer:
-                                self.frame_no += 1
-                                print(f"\n[INFO] End marker detected! Frame {self.frame_no} ready.")
-                                
-                                self.save_bin_from_sample()
-                                self.clear_sample_file()
-                                time.sleep(1)
-                                self.send_command(serial_com, self.flags.RESUME)
-                                print("[INFO] Resume command sent.")
-                                
-                                buffer.clear()
-                                print("-" * 40)
-                                
-                            # detect end cycle marker (FF FF FA FA)
-                            if END_MARKER in buffer:
-                                print("\n[INFO] End of test cycle detected!")
-                                self.save_bin_from_sample()
-                                self.clear_sample_file()
+                                # detect end cycle marker (FF FF FA FA)
+                                if END_CYCLE_MARKER in buffer:
+                                    print("\n[INFO] End of test cycle detected!")
+                                    self.save_bin_from_sample()
+                                    self.clear_sample_file()
 
-                                # stop requesting new data
-                                print("[INFO] Stopping serial communication and exiting test cycle.")
-                                serial_com.close()
-                                break  
+                                    # stop requesting new data
+                                    print("[INFO] Stopping serial communication and exiting test cycle.")
+                                    serial_com.close()
+                                    break  
+                                else:
+                                    self.frame_no += 1
+                                    print(f"\n[INFO] End marker detected! Frame {self.frame_no} ready.")
+                                    self.save_bin_from_sample()
+                                    self.clear_sample_file()
+                                    time.sleep(2)
+                                    self.send_command(serial_com, self.flags.RESUME)
+                                    print("[INFO] Resume command sent.")
+                                    
+                                    buffer.clear()
+                                    print("-" * 40)
+                                
                     else:
                         time.sleep(0.01)
 
