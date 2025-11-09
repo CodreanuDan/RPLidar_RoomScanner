@@ -80,28 +80,20 @@ def get_valid_measurement_from_sample_data(scan_data: bytes, turret_angle_deg: f
         angle_deg = angle_q6 / 64.0
         angle_deg = angle_deg % 360.0
         
-        # Convert to radians
+        # Convertire la radiani (unghiul brut al LIDAR-ului)
         lidar_angle_rad = math.radians(angle_deg)
         turret_rad = math.radians(turret_angle_deg)
         
-        # LIDAR spinning vertically creates a circle in the vertical plane
-        # The LIDAR's "forward" direction rotates with the turret
+        # --- IMPLEMENTAREA TRANSPOZIȚIEI LA NIVELUL PROIECȚIEI ---
+        # Presupunere: Unghiul 0°/360° al LIDAR-ului este pe Z (vertical).
         
-        # Step 1: LIDAR's local coordinates (vertical circle)
-        # Assuming angle_deg=0 points "forward" from LIDAR, angle_deg=90 points "up"
-        # This creates a vertical circle perpendicular to turret axis
+        r_in_plane = distance_mm * math.sin(lidar_angle_rad)  # Componenta orizontală (folosește sin)
+        z_global = distance_mm * math.cos(lidar_angle_rad)     # Componenta verticală (folosește cos)
         
-        # Distance components in LIDAR's local frame:
-        # - Forward/back component (along turret's viewing direction)
-        forward_dist = distance_mm * math.cos(lidar_angle_rad)
-        # - Up/down component (height)
-        z_height = distance_mm * math.sin(lidar_angle_rad)
+        effective_turret_rad = turret_rad 
         
-        # Step 2: Rotate forward_dist by turret angle to get X,Y in room coordinates
-        # Turret at 0° points in one direction, 180° points opposite
-        x_global = forward_dist * math.sin(turret_rad)
-        y_global = forward_dist * math.cos(turret_rad)
-        z_global = z_height
+        x_global = r_in_plane * math.cos(effective_turret_rad)
+        y_global = r_in_plane * math.sin(effective_turret_rad)
         
         measurements.append({
             "Index": i,
@@ -146,6 +138,52 @@ def save_interactive_3d_plot(df_filtered: pd.DataFrame, output_html: str):
         width=1200,
         height=900
     )
+
+    # Get room boundaries
+    x_min, x_max = df_filtered["X (mm)"].min(), df_filtered["X (mm)"].max()
+    y_min, y_max = df_filtered["Y (mm)"].min(), df_filtered["Y (mm)"].max()
+    z_min, z_max = df_filtered["Z (mm)"].min(), df_filtered["Z (mm)"].max()
+
+    # Draw box outline (12 edges of the rectangular room)
+    # Bottom rectangle
+    box_edges = [
+        # Bottom face
+        ([x_min, x_max], [y_min, y_min], [z_min, z_min]),
+        ([x_max, x_max], [y_min, y_max], [z_min, z_min]),
+        ([x_max, x_min], [y_max, y_max], [z_min, z_min]),
+        ([x_min, x_min], [y_max, y_min], [z_min, z_min]),
+        # Top face
+        ([x_min, x_max], [y_min, y_min], [z_max, z_max]),
+        ([x_max, x_max], [y_min, y_max], [z_max, z_max]),
+        ([x_max, x_min], [y_max, y_max], [z_max, z_max]),
+        ([x_min, x_min], [y_max, y_min], [z_max, z_max]),
+        # Vertical edges
+        ([x_min, x_min], [y_min, y_min], [z_min, z_max]),
+        ([x_max, x_max], [y_min, y_min], [z_min, z_max]),
+        ([x_max, x_max], [y_max, y_max], [z_min, z_max]),
+        ([x_min, x_min], [y_max, y_max], [z_min, z_max]),
+    ]
+    
+    for i, (x_edge, y_edge, z_edge) in enumerate(box_edges):
+        fig.add_trace(go.Scatter3d(
+            x=x_edge,
+            y=y_edge,
+            z=z_edge,
+            mode="lines",
+            line=dict(color="red", width=3),
+            showlegend=(i == 0),
+            name="Room Box" if i == 0 else None
+        ))
+
+    # Add vertical red line at origin (reference)
+    fig.add_trace(go.Scatter3d(
+        x=[0, 0],
+        y=[0, 0],
+        z=[z_min, z_max],
+        mode="lines",
+        line=dict(color="yellow", width=5, dash="dash"),
+        name="Origin (0,0)"
+    ))
 
     fig.write_html(output_html)
     print(f"--> Interactive 3D plot saved as: {output_html}")
@@ -200,8 +238,12 @@ def decode_all_bin_files(frames_folder: str, output_excel: str):
         (df['Z (mm)'] <= mean_z + FILTER_STD_FACTOR*std_z)
     )
     df_filtered = df[mask]
-    df_filtered = df_filtered.rename(columns={"Y (mm)": "Z (mm)", "Z (mm)": "Y (mm)"})
-
+    
+    # Swap X and Z axes - X contains the actual height data!
+    # df_filtered = df_filtered.rename(columns={
+    #     "X (mm)": "Z (mm)",
+    #     "Z (mm)": "X (mm)"
+    # })
 
     # Save Excel
     with pd.ExcelWriter(output_excel) as writer:
@@ -228,6 +270,10 @@ def decode_all_bin_files(frames_folder: str, output_excel: str):
     
     # Color by height (Z) for better room visualization
     sc = ax.scatter(xs, ys, zs, c=zs, cmap='viridis', s=0.5, marker='o', alpha=0.6)
+    # --- Draw vertical red bar at Z = 0 reference plane ---
+    ax.plot([0, 0], [0, 0], [df_filtered['Z (mm)'].min(), df_filtered['Z (mm)'].max()],
+            color='red', linewidth=1.5, linestyle='--', label='Z=0 reference')
+    ax.legend()
 
     ax.set_xlabel('X (mm) - Room Width', fontsize=12)
     ax.set_ylabel('Y (mm) - Room Depth', fontsize=12)
