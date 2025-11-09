@@ -96,6 +96,9 @@
 							</tool>
 						</toolChain>
 					</folderInfo>
+					<sourceEntries>
+						<entry excluding="old_versions/BEFORE_SERVO_PROGRAM.c|old_versions/BEFORE_CUSOTOM_SERVO_ANGLE.c" flags="VALUE_WORKSPACE_PATH|RESOLVED" kind="sourcePath" name=""/>
+					</sourceEntries>
 				</configuration>
 			</storageModule>
 			<storageModule moduleId="org.eclipse.cdt.core.externalSettings"/>
@@ -204,4 +207,5 @@
 		<project id="RPLidarRoomScannerOfficial.com.ti.ccstudio.buildDefinitions.MSP430.ProjectType.2093439027" name="MSP430" projectType="com.ti.ccstudio.buildDefinitions.MSP430.ProjectType"/>
 	</storageModule>
 	<storageModule moduleId="scannerConfiguration"/>
+	<storageModule moduleId="org.eclipse.cdt.make.core.buildtargets"/>
 </cproject>

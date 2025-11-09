@@ -75,6 +75,9 @@ volatile uint8_t servo_pos;
  */
 volatile uint8_t i;
 
+/* Global variable for servo step */
+volatile uint8_t servo_step_degrees = 1;  // Default 1deg per frame
+
 
 /*
  * Lidar Ctrl control states
@@ -353,56 +356,66 @@ void Configure_UART1_PC_115200()
  *
  *
  * [UART1_TX_buffer] --> <data> copy in --> [UART1_RX_buffer] --> <data> --> [COMx_TX_buffer_PC]
+ * Modified to receive 2-byte command: [0x01][angle_step]
+ * Echo back: Command byte + (optionally) preset byte if step is 2 or 4
  *
  */
 #pragma vector=USCI_A1_VECTOR
 __interrupt void USCI_A1_ISR(void)
 {
-#if OLD_UART1_TX == 1
-    switch(__even_in_range(UCA1IV,USCI_UART_UCTXCPTIFG))
-    {
-        case USCI_NONE: break;
-        case USCI_UART_UCRXIFG:
-            while(!(UCA1IFG&UCTXIFG));          // verifica daca poate transmite catre PC ( NU-s intreruperi pe UART TX adica )
-            UCA1TXBUF = UCA1RXBUF;              // echo TX-RX
-            __no_operation();
-            break;
-        case USCI_UART_UCTXIFG: break;
-        case USCI_UART_UCSTTIFG: break;
-        case USCI_UART_UCTXCPTIFG: break;
-        default: break;
-    }
-#endif
+    static uint8_t waiting_for_angle_data = 0;
 
-#if NEW_UART1_TX == 1
     switch(__even_in_range(UCA1IV,USCI_UART_UCTXCPTIFG))
     {
         case USCI_NONE: break;
         case USCI_UART_UCRXIFG:
         {
-            uint8_t command_byte = UCA1RXBUF;
+            uint8_t received_byte = UCA1RXBUF;
 
-            if (command_byte == START_MEASUREMENT_CYCLE_CMD)
+            if (waiting_for_angle_data)
             {
-                // Cmd 0x01: Incepe primul ciclu de masurare
+                // Second byte received - this is the angle step
+                servo_step_degrees = received_byte;
+                waiting_for_angle_data = 0;
+
+                // Now actually start the measurement
                 servo_pos = 0;
                 ServoCtrl_setAngle(0);
                 nextLidarState = LIDAR_STATE_MEAS;
+
+                // Echo back the command byte first
+                while(!(UCA1IFG&UCTXIFG));
+                UCA1TXBUF = START_MEASUREMENT_CYCLE_CMD;
+
+                // If preset is 2 or 4, echo back the preset value too
+                if (servo_step_degrees == 2 || servo_step_degrees == 4)
+                {
+                    while(!(UCA1IFG&UCTXIFG));
+                    UCA1TXBUF = servo_step_degrees;
+                }
             }
-            else if (command_byte == RESUME_MEASUREMENT_CMD)
+            else if (received_byte == START_MEASUREMENT_CYCLE_CMD)
             {
-                // Cmd 0x02: Reia masuratoarea (MSP430 iese din PAUSE)
+                // Cmd 0x01: Expect second byte with angle step
+                waiting_for_angle_data = 1;
+            }
+            else if (received_byte == RESUME_MEASUREMENT_CMD)
+            {
+                // Cmd 0x02: Resume measurement
                 nextLidarState = LIDAR_STATE_MEAS;
+
+                while(!(UCA1IFG&UCTXIFG));
+                UCA1TXBUF = received_byte;
             }
-            else if (command_byte == STOP_MEASUREMENT_CMD)
+            else if (received_byte == STOP_MEASUREMENT_CMD)
             {
-                // Cmd 0x00: LIDAR_STATE_STOP tot
+                // Cmd 0x00: STOP everything
                 nextLidarState = LIDAR_STATE_STOP;
+                waiting_for_angle_data = 0;
+
+                while(!(UCA1IFG&UCTXIFG));
+                UCA1TXBUF = received_byte;
             }
-
-
-            while(!(UCA1IFG&UCTXIFG));          // verifica daca poate transmite catre PC ( NU-s intreruperi pe UART TX adica )
-            UCA1TXBUF = command_byte;           // Echo back the command
 
             __no_operation();
             break;
@@ -412,11 +425,7 @@ __interrupt void USCI_A1_ISR(void)
         case USCI_UART_UCTXCPTIFG: break;
         default: break;
     }
-#endif
-
 }
-
-
 
 
 /******************* Rutina de tratare a intreruperilor UART A0 {{LIDAR <--> MSP}} ***********
@@ -573,7 +582,7 @@ void LidarCtrl_StopMeasurement()
          * -If the servo position is < 180 degress move one step for each measurement
          * -If the servo position is = 180 degress reset servo position and stop measurements and send stop flag
          */
-        ServoCtrl_moveDuringScan(1);
+        ServoCtrl_moveDuringScan(servo_step_degrees);  // Use the configured step
     }
 
 }
@@ -700,7 +709,9 @@ void ServoCtrl_testRange(int speed)
     }
 }
 
-/* Move servo during scan */
+/* Move servo during scan
+ * --> Updated to use servo_step_degrees
+ */
 void ServoCtrl_moveDuringScan(uint8_t deg)
 {
     /*
@@ -708,12 +719,15 @@ void ServoCtrl_moveDuringScan(uint8_t deg)
      * Move servo BEFORE starting next scan
      * -If the servo position is < 180 degress move one step for each measurement
      * -If the servo position is = 180 degress reset servo position and stop measurements and send stop flag
+     *
+     * Move servo BEFORE starting next scan
+     * Use the servo_step_degrees variable set via UART
      */
     if (servo_pos < 180)
     {
-        servo_pos += deg;
+        servo_pos += deg;  // deg will be servo_step_degrees (1, 2, or 4)
         ServoCtrl_setAngle(servo_pos);
-        delay_ms(300);                  // Wait for servo to settle
+        delay_ms(300);  // Wait for servo to settle
     }
     else if (servo_pos >= 180)
     {
