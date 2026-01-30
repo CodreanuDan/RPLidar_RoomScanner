@@ -537,8 +537,11 @@ void Configure_WDT()
 /*
  * Function name: LidarCtrl_StopMeasurement
  * Stop scan sequence:
- * 1. Send STOP CMD 0xA5 0x25
- * 2. Stop Lidar Motor
+ * 1. Send STOP CMD 0xA5 0x25 and ECHO
+ * 2. Send END MARKER 0xFF 0xFF 0xFF 0xFF and ECHO
+ * 3. Stop Lidar Motor
+ * 4. If the measurement is complete send END CYCLE MARKER 0xFF 0xFF 0xFA 0xFA to stop the frame grabber and ECHO
+ * 5. Control the turret
  */
 void LidarCtrl_StopMeasurement()
 {
@@ -591,9 +594,9 @@ void LidarCtrl_StopMeasurement()
  * Function name: LidarCtrl_StartMeasurement
  * Start scan sequence:
  * 1. Start Lidar Motor
- * 2. Send GET HEALTH STATUS CMD 0xA5 0x52
- * 3. Send START SCAN CMD 0xA5 0x20
- * 4. Strat Timer B counter mode
+ * 2. Send GET HEALTH STATUS CMD 0xA5 0x52 and ECHO
+ * 3. Send START SCAN CMD 0xA5 0x20 and ECHO
+ * 4. Start Timer B counter mode
  */
 void LidarCtrl_StartMeasurement()
 {
